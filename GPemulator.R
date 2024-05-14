@@ -1,68 +1,95 @@
-GPtraining <- function(x, Y, kernel_function = 'sexp', optim_method = "L-BFGS-B"){
-  # Function to train the GP
+#################################### Training of GP ##########################################
+GPtrainingmle <- function(x, Y, kernel_function = 'sexp', optim_method = "SANN"){
+  # Function to train the GP using MLE
   # x is the M * D input
   # kernel_function's default is 'sexp'
-  # optim_method's default is L-BFGS-B
+  # optim_method's default is SANN
   # return three parameters estimation: scale, length-scale, and nugget
+  
+  m <- nrow(x)
+  
+  sexp <- function(x, nugget, ls, m) {
+    ### The function to get the correlation matrix when using the squared-exponential kernel
+    ##Input:
+    # x is the input(size = M * D)
+    # ls is the length-scale
+    # m is the number of design points(M)
+    ## Output:
+    # The correlation matrix R of size M * M
+    kse <- function(d, ls){
+      ## The function to do squared-exponential kernel function
+      # d is the distance
+      # ls is the length-scale parameter
+      return(sum(-d^2 / (ls^2)))
+    }
+    R <- matrix(0, nrow = m, ncol = m)
+    for (j in 1:m){
+      for (i in 1:m){
+        R[i, j] <- exp(kse((x[i,] - x[j,]), ls))
+      }
+    }
+    diag(R) <- diag(R) + nugget
+    return(R)
+  }
+  
+  nugget <- 1e-8 # nugget
   log_likelihood <- function(params, x, Y){
-    scale <- exp(params[1]) # scale parameter
-    ls <- exp(params[2]) # length-scale parameter
-    nugget <- exp(params[3]) # nugget
+    l <- exp(params[1]) # length-scale parameter
+    nugget <- 1e-8 # nugget
+    
+    R <- sexp(x, nugget, l, m)
     
     # Compute the covariance matrix
     m <- nrow(x) # Get the number of designs
-    sexp <- function(x, nugget, ls, m) {
-      ### The function to get the correlation matrix when using the squared-exponential kernel
-      ##Input:
-      # x is the input(size = M * D)
-      # ls is the length-scale
-      # m is the number of design points(M)
-      ## Output:
-      # The correlation matrix R of size M * M
-      kse <- function(d, ls){
-        ## The function to do squared-exponential kernel function
-        # d is the distance
-        # ls is the length-scale parameter
-        return(exp(-d^2 / (2 * ls^2)))
-      }
-      R <- matrix(0, nrow = m, ncol = m)
-      for (j in 1:m){
-        for (i in 1:m){
-          R[i, j] <- prod(kse(abs(x[i,] - x[j,]), ls))
-        }
-      }
-      diag(R) <- diag(R) + nugget
-      return(R)
-    }
-    
-    K <- scale * sexp(x, nugget, ls, m) # Get the covariance matrix
     
     # Compute the log-likelihood
-    log_likelihood_value <- 0.5 * (t(Y) %*% solve(K) %*% Y + log(det(K)) + m * log(2 * pi))
+    sc <- (1/m) * t(Y) %*% solve(R, Y)
+    #log_likelihood_value <- - 0.5 * (log(det(R)) + m * log(2 * pi * sc) + m)
+                            
+    log_likelihood_value <- 0.5 * (log(det(R) + m * log(sc)))
     
     return(log_likelihood_value)
-    
   }
   
   # Initial guess for parameters
-  initial_params <- c(log(1), log(1), log(.1))
+  initial_params <- c(log(1))
   
   # Perform optimization to maximize the log-likelihood
-  optimized_params <- optim(par = initial_params, fn = log_likelihood, x = x, Y = Y, method = optim_method)
+  optimized_params <- optim(par = initial_params, fn = log_likelihood, x = x, Y = Y, method = "SANN")
   
   # Extract the optimized parameters
-  sigma_sq_opt <- exp(optimized_params$par[1])
-  l_opt <- exp(optimized_params$par[2])
-  nugget_opt <- exp(optimized_params$par[3])
+  l_opt <- exp(optimized_params$par[1])
+  R1 <- sexp(x, nugget, l_opt, m)
+  sc <- (1/m) * t(Y) %*% solve(R1, Y)
   
-  return(c(sigma_sq_opt, l_opt, nugget_opt))
+  result <- list(
+    kernel = "sexp",
+    lengthscales = l_opt,
+    scale = sc,
+    nugget = nugget
+  )
+  
+  return(result)
+
+################################## GP training using reference prior ######################################
+GPtrainingrobust <- function(x, Y, zero_mean = 'Yes', kernel = 'pow_exp', alpha = 2){
+  # PACKAGE rgasp IS REQUIRED
+  m <- rgasp(x, Y, zero.mean = zero_mean, 
+             kernel_type = kernel, alpha = alpha)
+  sc <- m@sigma2_hat
+  l_opt <- 1/m@beta_hat
+  
+  result <- list(
+    kernel = "sexp",
+    lengthscales = l_opt,
+    scale = sc,
+    nugget = 1e-8
+  )
+  
+  return(result)
 }
 
-
-GPtraining(x, Y)
-
-############################################################################################
-
+###################################### GP emulator ###################################################
 GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star){
   ### Function to construct the Gaussian Process emulator
   ## Inputs:
@@ -79,26 +106,15 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   
   m <- nrow(x) # Get the number of designs
   
-  sexp <- function(x, nugget, ls, m) {
+  sexp <- function(x, nugget, ls) {
     ### The function to get the correlation matrix when using the squared-exponential kernel
     ##Input:
     # x is the input(size = M * D)
-    # ls is the length-scale
+    # ls is the length-scale parameter, which have size of 1*d
     # m is the number of design points(M)
     ## Output:
     # The correlation matrix R of size M * M
-    kse <- function(d, ls){
-      ## The function to do squared-exponential kernel function
-      # d is the distance
-      # ls is the length-scale parameter
-      return(exp(-d^2 / (2 * ls^2)))
-    }
-    R <- matrix(0, nrow = m, ncol = m)
-    for (j in 1:m){
-      for (i in 1:m){
-        R[i, j] <- prod(kse(abs(x[i,] - x[j,]), ls))
-      }
-    }
+    R <- exp(-as.matrix(dist(x))^2 / ls^2)
     diag(R) <- diag(R) + nugget
     return(R)
   }
@@ -106,14 +122,20 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   # The r(x_star) matrix, which have size M * 1
   r <- matrix(0, nrow = m, ncol = 1)
   for (i in 1: m){
-    r[i] <- prod(exp(-abs(x[i,] - x_star)^2 / (2 * ls^2))) + as.numeric(x[i,] == x_star) * nugget
+    r[i] <- exp(-sum((x[i,] - x_star)^2 / (ls^2)) )
   }
   
   # Get the correlation matrix R
-  R <- as.matrix(sexp(x, nugget, ls, m))
+  R <- as.matrix(sexp(x, nugget, ls))
   
-  mean <- t(r) %*% solve(R) %*% Y
-  variance <- sqrt(scale) * (1 + nugget - t(r) %*% solve(R) %*% r)
+  mean <- t(r) %*% solve(R, Y)
+  variance <- scale * (1 + nugget - t(r) %*% solve(R, r))
   
-  return(c(mean, sqrt(variance)))
+  result <- list(
+    kernel = "sexp",
+    mean = mean,
+    sd = sqrt(variance)
+  )
+  
+  return(result)
 }
