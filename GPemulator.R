@@ -1,10 +1,11 @@
 #################################### Training of GP ##########################################
 GPtrainingmle <- function(x, Y, kernel_function = 'sexp', optim_method = "SANN"){
-  # Function to train the GP using MLE
-  # x is the M * D input
-  # kernel_function's default is 'sexp'
-  # optim_method's default is SANN
-  # return three parameters estimation: scale, length-scale, and nugget
+  #' Function to train the GP using MLE
+  #'
+  #' @param x is the M * D input
+  #' @param kernel_function's default is 'sexp'
+  #' @param optim_method's default is SANN
+  #' @return return three parameters estimation: scale, length-scale, and nugget
   
   m <- nrow(x)
   
@@ -73,7 +74,16 @@ GPtrainingmle <- function(x, Y, kernel_function = 'sexp', optim_method = "SANN")
 
 ################################## GP training using reference prior ######################################
 GPtrainingrobust <- function(x, Y, zero_mean = 'Yes', kernel = 'pow_exp', alpha = 2){
-  # PACKAGE rgasp IS REQUIRED
+  #' PACKAGE rgasp IS REQUIRED
+  #' Function to train the GP emulator using rgasp
+  #'
+  #' @param x is the M*D input
+  #' @param Y is the corresponding output which have size 1*D
+  #' @param zero_mean determines whether the trend zero or not
+  #' @param kernel sepecifies the kernel function
+  #' @param alpha determines the roughness parameters when using pow_exp kernel
+  #' @return the result list contains kernel type, lengthscales(1*D), scale, nugget
+  
   m <- rgasp(x, Y, zero.mean = zero_mean, 
              kernel_type = kernel, alpha = alpha)
   sc <- m@sigma2_hat
@@ -91,18 +101,19 @@ GPtrainingrobust <- function(x, Y, zero_mean = 'Yes', kernel = 'pow_exp', alpha 
 
 ###################################### GP emulator ###################################################
 GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star){
-  ### Function to construct the Gaussian Process emulator
-  ## Inputs:
-  # x: M-point design of D-dimensional inputs to a computer model, which size is M * D
-  # Y: the corresponding scalar-valued out with size of M * 1
-  # kernel_function: can be selected between Matérn2.5(mat2.5) and squared exponential(sexp)
-  # scale: the scale parameter
-  # nugget: the nugget added in the covariance matrix diagonal
-  # ls: the length-scales parameter in the kernel function
-  # x_star: a new input position which have size of 1 * D
-  ## Outputs:
-  # The mean at the new input position x_star
-  # The variance at the new input position x_star
+  #' Function to construct the Gaussian Process emulator
+  #'
+  #' @param x: M-point design of D-dimensional inputs to a computer model, which size is M * D
+  #' @param Y: the corresponding scalar-valued out with size of M * 1
+  #' @param kernel_function: can be selected between Matérn2.5(mat2.5) and squared exponential(sexp)
+  #' @param scale: the scale parameter
+  #' @param nugget: the nugget added in the covariance matrix diagonal
+  #' @param ls: the length-scales parameter in the kernel function
+  #' @param x_star: a new input position which have size of 1 * D
+  #'
+  #' @return: 
+  #' The mean at the new input position x_star
+  #' The variance at the new input position x_star
   
   m <- nrow(x) # Get the number of designs
   
