@@ -139,8 +139,12 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   # Get the correlation matrix R
   R <- as.matrix(sexp(x, nugget, ls))
   
-  mean <- t(r) %*% solve(R, Y)
-  variance <- scale * (1 + nugget - t(r) %*% solve(R, r))
+  L <- t(chol(R))
+  mean <- t(forwardsolve(L, r)) %*% forwardsolve(L, Y)
+  #mean <- t(r) %*% solve(R, Y)
+
+  variance <- scale * (1 + nugget - crossprod(forwardsolve(L, r)))
+  #variance <- scale * (1 + nugget - t(r) %*% solve(R, r))
   
   result <- list(
     kernel = "sexp",
