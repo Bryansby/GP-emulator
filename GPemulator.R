@@ -108,14 +108,16 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   #' @param kernel_function: can be selected between Matérn2.5(mat2.5) and squared exponential(sexp)
   #' @param scale: the scale parameter
   #' @param nugget: the nugget added in the covariance matrix diagonal
-  #' @param ls: the length-scales parameter in the kernel function
-  #' @param x_star: a new input position which have size of 1 * D
+  #' @param ls: the length-scales parameters in the kernel function
+  #' @param x_star: new input positions/locations which have size of T * D
   #'
   #' @return: 
-  #' The mean at the new input position x_star
-  #' The variance at the new input position x_star
+  #' The mean at new input positions x_star
+  #' The std at new input positions x_star
   
   m <- nrow(x) # Get the number of designs
+  d <- ncol(x) # Get the dimension of the inputs
+  t <- nrow(x_star) # Get the number of test/prediction inputs/locations
   
   sexp <- function(x, nugget, ls) {
     ### The function to get the correlation matrix when using the squared-exponential kernel
@@ -130,21 +132,25 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
     return(R)
   }
   
-  # The r(x_star) matrix, which have size M * 1
-  r <- matrix(0, nrow = m, ncol = 1)
-  for (i in 1: m){
-    r[i] <- exp(-sum((x[i,] - x_star)^2 / (ls^2)) )
+  mean <- c(1:t)
+  variance <- c(1:t)
+  
+  for (j in 1:t) {
+    
+    # The r(x_star) matrix, which have size M * 1
+    r <- matrix(0, nrow = m, ncol = 1)
+    for (i in 1: m){
+      r[i] <- exp(-sum((x[i,] - x_star[j,])^2 / (ls^2)) )
+    }
+  
+    # Get the correlation matrix R
+    R <- as.matrix(sexp(x, nugget, ls))
+  
+    L <- t(chol(R))
+    
+    mean[j] <- t(forwardsolve(L, r)) %*% forwardsolve(L, Y)
+    variance[j] <- scale * (1 + nugget - crossprod(forwardsolve(L, r)))
   }
-  
-  # Get the correlation matrix R
-  R <- as.matrix(sexp(x, nugget, ls))
-  
-  L <- t(chol(R))
-  mean <- t(forwardsolve(L, r)) %*% forwardsolve(L, Y)
-  #mean <- t(r) %*% solve(R, Y)
-
-  variance <- scale * (1 + nugget - crossprod(forwardsolve(L, r)))
-  #variance <- scale * (1 + nugget - t(r) %*% solve(R, r))
   
   result <- list(
     kernel = "sexp",
@@ -153,4 +159,5 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   )
   
   return(result)
+
 }
