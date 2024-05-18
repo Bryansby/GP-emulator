@@ -117,7 +117,7 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   
   m <- nrow(x) # Get the number of designs
   d <- ncol(x) # Get the dimension of the inputs
-  t <- nrow(x_star) # Get the number of test/prediction inputs/locations
+  n_pred <- nrow(x_star) # Get the number of test/prediction inputs/locations
   
   sexp <- function(x, nugget, ls) {
     ### The function to get the correlation matrix when using the squared-exponential kernel
@@ -132,10 +132,10 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
     return(R)
   }
   
-  mean <- c(1:t)
-  variance <- c(1:t)
+  mean <- c(1:n_pred)
+  variance <- c(1:n_pred)
   
-  for (j in 1:t) {
+  for (j in 1:n_pred) {
     
     # The r(x_star) matrix, which have size M * 1
     r <- matrix(0, nrow = m, ncol = 1)
