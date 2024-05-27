@@ -101,8 +101,7 @@ GPtrainingrobust <- function(x, Y, zero_mean = 'Yes', kernel = 'pow_exp', alpha 
 
 ###################################### GP emulator ###################################################
 GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star){
-  #' Function to construct the Gaussian Process emulator
-  #'
+  #' @description Function to construct the Gaussian Process emulator
   #' @param x: M-point design of D-dimensional inputs to a computer model, which size is M * D
   #' @param Y: the corresponding scalar-valued out with size of M * 1
   #' @param kernel_function: can be selected between Matérn2.5(mat2.5) and squared exponential(sexp)
@@ -118,9 +117,9 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   m <- nrow(x) # Get the number of designs
   d <- ncol(x) # Get the dimension of the inputs
   n_pred <- nrow(x_star) # Get the number of test/prediction inputs/locations
-
+  
   kse <- function(distance, ls) {
-    #' The function to do squared-exponential kernel function
+    #' @description The function to do squared-exponential kernel function
     #' @param distance is the distance
     #' @param ls is the length-scale parameter
     #' @return value the value of squared exponential kernel
@@ -128,12 +127,11 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   }
   
   sexp <- function(x, nugget, ls) {
-    #‘ The function to get the correlation matrix when using the squared-exponential kernel
-    #’ @param x is the input(size = M * D)
-    #’ @param ls is the length-scale parameter, which have size of 1*d
-    #’ @param m is the number of design points(M)
-    #'
-    #' @ return The correlation matrix R of size M * M
+    #' @description The function to get the correlation matrix when using the squared-exponential kernel
+    #' @param x is the input(size = M * D)
+    #' @param ls is the length-scale parameter, which have size of 1*d
+    #' @param m is the number of design points(M)
+    #' @return The correlation matrix R of size M * M
     
     D <- ncol(x) # dimension
     M <- nrow(x) # number of design
@@ -160,18 +158,14 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   variance <- c(1:n_pred)
   
   for (j in 1:n_pred) {
-    
     # The r(x_star) matrix, which have size M * 1
     r <- matrix(0, nrow = m, ncol = 1)
     for (i in 1: m){
       r[i] <- exp(-sum((x[i,] - x_star[j,])^2 / (ls^2)) )
     }
-  
     # Get the correlation matrix R
     R <- as.matrix(sexp(x, nugget, ls))
-  
     L <- t(chol(R))
-    
     mean[j] <- t(forwardsolve(L, r)) %*% forwardsolve(L, Y)
     variance[j] <- scale * (1 + nugget - crossprod(forwardsolve(L, r)))
   }
@@ -183,5 +177,5 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   )
   
   return(result)
-
+  
 }
