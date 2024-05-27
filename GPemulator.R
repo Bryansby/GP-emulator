@@ -118,17 +118,41 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
   m <- nrow(x) # Get the number of designs
   d <- ncol(x) # Get the dimension of the inputs
   n_pred <- nrow(x_star) # Get the number of test/prediction inputs/locations
+
+  kse <- function(distance, ls) {
+    #' The function to do squared-exponential kernel function
+    #' @param distance is the distance
+    #' @param ls is the length-scale parameter
+    #' @return value the value of squared exponential kernel
+    return(exp(- distance ^ 2 / (ls ^ 2)))
+  }
   
   sexp <- function(x, nugget, ls) {
-    ### The function to get the correlation matrix when using the squared-exponential kernel
-    ##Input:
-    # x is the input(size = M * D)
-    # ls is the length-scale parameter, which have size of 1*d
-    # m is the number of design points(M)
-    ## Output:
-    # The correlation matrix R of size M * M
-    R <- exp(-as.matrix(dist(x))^2 / ls^2)
-    diag(R) <- diag(R) + nugget
+    #‘ The function to get the correlation matrix when using the squared-exponential kernel
+    #’ @param x is the input(size = M * D)
+    #’ @param ls is the length-scale parameter, which have size of 1*d
+    #’ @param m is the number of design points(M)
+    #'
+    #' @ return The correlation matrix R of size M * M
+    
+    D <- ncol(x) # dimension
+    M <- nrow(x) # number of design
+    
+    R <- matrix(NA, M, M)
+    
+    for (j in 1:M) {
+      for (i in 1:M) {
+        # Consider (j, i) entry of the covariance matrix
+        first <- NULL
+        second <- NULL
+        for (d in 1:D) {
+          first[d] <- kse(x[i, d] - x[j, d], ls = ls[d])
+          second[d] <- ifelse(x[i, d] == x[j, d], 1, 0)
+        }
+        R[j, i] <- prod(first) + nugget * prod(second)
+      }
+    }
+    
     return(R)
   }
   
