@@ -1,7 +1,8 @@
 ##################################### GP Vecchia ######################################
 GPvecchia <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star, n){
-  #' Function using Vecchia approximation in the construction of GP emulator
-  #' This Vecchia approximation do condition only on the observation points
+  #' @description Function using Vecchia approximation in the construction of GP emulator
+  #' @description This Vecchia approximation do condition only on the observation points
+  #' 
   #' @param x is the input (size of m * d)
   #' @param Y is the corresponding output (size of 1 * d)
   #' @param kernel_function specifies the kernel type to be used
@@ -9,18 +10,45 @@ GPvecchia <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star,
   #' @param ls is the length-scale parameter
   #' @param x_star is the points to be predicted or tested(size of p * d)
   #' @param n is the number of neighbors to return
+  #' 
   #' @export result the list contains mean and variance at the x_star
   
+  kse <- function(distance, ls) {
+    #' @description The function to do squared-exponential kernel function
+    #' @param distance is the distance
+    #' @param ls is the length-scale parameter
+    #' @return the value of squared exponential kernel(not include exponential)
+    return(- distance ^ 2 / (ls ^ 2))
+  }
+  
   sexp <- function(x, nugget, ls) {
-    #' The function to get the correlation matrix when using the squared-exponential kernel
+    #' @description The function to get the correlation matrix when using the squared-exponential kernel
     #' @param x is the input(size = M * D)
-    #' @param nugget is the nugget
     #' @param ls is the length-scale parameter, which have size of 1*d
-    #' @export R The correlation matrix R of size M * M
-    R <- exp(-as.matrix(dist(x))^2 / ls^2)
-    diag(R) <- diag(R) + nugget
+    #' @param m is the number of design points(M)
+    #' @return The correlation matrix R of size M * M
+    
+    D <- ncol(x) # dimension
+    M <- nrow(x) # number of design
+    
+    R <- matrix(NA, M, M)
+    
+    for (j in 1:M) {
+      for (i in 1:M) {
+        # Consider (j, i) entry of the covariance matrix
+        first <- NULL
+        second <- NULL
+        for (d in 1:D) {
+          first[d] <- kse(x[i, d] - x[j, d], ls = ls[d])
+          second[d] <- ifelse(x[i, d] == x[j, d], 1, 0)
+        }
+        R[j, i] <- exp(sum(first)) + nugget * prod(second)
+      }
+    }
+    
     return(R)
   }
+  
   # get nearest neighbor array
   find_nn <- function(obs_locs, pred_locs, n){
     #' Function find the five nearest observations locations to the prediction locations
