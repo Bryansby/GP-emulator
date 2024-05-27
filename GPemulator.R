@@ -102,6 +102,7 @@ GPtrainingrobust <- function(x, Y, zero_mean = 'Yes', kernel = 'pow_exp', alpha 
 ###################################### GP emulator ###################################################
 GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star){
   #' @description Function to construct the Gaussian Process emulator
+  #' 
   #' @param x: M-point design of D-dimensional inputs to a computer model, which size is M * D
   #' @param Y: the corresponding scalar-valued out with size of M * 1
   #' @param kernel_function: can be selected between Matérn2.5(mat2.5) and squared exponential(sexp)
@@ -122,8 +123,8 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
     #' @description The function to do squared-exponential kernel function
     #' @param distance is the distance
     #' @param ls is the length-scale parameter
-    #' @return value the value of squared exponential kernel
-    return(exp(- distance ^ 2 / (ls ^ 2)))
+    #' @return the value of squared exponential kernel(not include exponential)
+    return(- distance ^ 2 / (ls ^ 2))
   }
   
   sexp <- function(x, nugget, ls) {
@@ -147,7 +148,7 @@ GPemulator <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star
           first[d] <- kse(x[i, d] - x[j, d], ls = ls[d])
           second[d] <- ifelse(x[i, d] == x[j, d], 1, 0)
         }
-        R[j, i] <- prod(first) + nugget * prod(second)
+        R[j, i] <- exp(sum(first)) + nugget * prod(second)
       }
     }
     
