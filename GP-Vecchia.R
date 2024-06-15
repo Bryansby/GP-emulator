@@ -104,7 +104,7 @@ GPvecchia_obs <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_s
 }
 
 
-############################# GP Vecchia (Observation & Prediction) ##############################
+############################# GP Vecchia (Condition both on Observation & Prediction) ##############################
 GPvecchia <- function(x, Y, kernel_function = 'sexp', scale, ls, nugget, x_star, n){
   #' @description Function using Vecchia approximation in the construction of GP emulator
   #' @description This Vecchia approximation do condition only on the observation points
