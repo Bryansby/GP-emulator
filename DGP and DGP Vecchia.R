@@ -1,0 +1,707 @@
+######## Training #########
+fit_two_layer3.0_matern <- function(x, Y, u = 2, l = 1, ls_y = 1, ls_w = 1, node, W, n_iteration = 10000, burn_in = 7000, nugget = 1e-6, v){
+  #' @description To do the training for simple two layer Deep Gaussian Processes model
+  #' @param x is the input value, which have the size of M * D
+  #' @param Y is the output value, which have the size of M * 1
+  #' @param u is the parameter for the proposals distribution, default to 2 (according to Sauer)
+  #' @param l is the parameter for the proposals distribution, default to 1 (according to Sauer)
+  #' @param ls_y is the initial value for the length-scale parameter in the first layer, default to 1
+  #' @param ls_w is the initial value for the length-scale parameter in the second layer, default to 1
+  #' @param node is the number of latent nodes in the model
+  #' @param W is the initial output value come from the second layer, is the latent variable, default to 1
+  #' @param n_iteration is the number of iteration for the MCMC, default is 10000
+  #' @param burn_in the iteration number for MCMC to warm up
+  #' @param nugget is the nugget, set to 1e-4
+  #' @param v is the smooth parameter for Matern Kernel
+  #' @returns result list contain:
+  #'                              1. result summary
+  #'                              2. samples of theta_y
+  #'                              3. samples of theta_w
+  #'                              4. samples of latent variable w
+  #'                              5. trace plot of theta_y
+  
+  library(plgp)
+  library(MASS)
+  library(gridExtra)
+  library(ggplot2)
+  library(deepgp)
+  library(mvtnorm)
+  
+  scale_sampling <- function(w, ls_y, Y, g = nugget, v){
+    n <- nrow(Y)
+    R <- deepgp:::Matern(distance(w), 1, ls_y, g, v)
+    quadterm <- t(Y) %*% (deepgp:::invdet(R))$Mi %*% (Y)
+    scale <- c(quadterm) / n
+    return(scale)
+  }
+  
+  loglik_yw <- function(Y, w, ls_y, g = 1e-6, v){
+    #' @description To compute the log-likelihood of the first layer
+    n <- nrow(Y)
+    R <- deepgp:::Matern(distance(w), 1, ls_y, g, v)
+    quadterm <- t(Y) %*% (deepgp:::invdet(R))$Mi %*% (Y)
+    return(- 0.5 * n * log(2*pi*quadterm/n) - 0.5 * (log(det(R))))
+  }
+  
+  loglik_wx <- function(w, x, ls_w, g = 1e-6, v){
+    #' @description To compute the log-likelihood of the second layer
+    w <- matrix(w, ncol = node)
+    R <- deepgp:::Matern(distance(x), 1, ls_w, g, v)
+    log_l <- rep(NA, node)
+    for (i in 1:node) {
+      quadterm <- t(w[,i]) %*% (deepgp:::invdet(R))$Mi %*% (w[,i])
+      log_l[i] <- (- 0.5) * log(det(R)) - 0.5 * (quadterm)
+    }
+    return(sum(log_l))
+  }
+  
+  MH_1 <- function(ls, Y, w, u = 2, l = 1, alpha = 1.5, beta = 0.65, v){
+    #' @description Function to sample the length-scale parameter using Metropolis-Hasting in layer 1, ls_y
+    w <- as.matrix(w, ncol = node)
+    ls_star <- runif(1, min = l*ls / u, max = u*ls / l) # new value
+    log_alpha <- loglik_yw(Y, w, ls_star, 1e-6, v) + 
+      dgamma(ls_star - 1.490116e-08, alpha, beta, log = TRUE) +
+      log(ls) -
+      loglik_yw(Y, w, ls, 1e-6, v) - 
+      dgamma(ls - 1.490116e-08, alpha, beta, log = TRUE) - 
+      log(ls_star)
+    U <- runif(1, 0, 1)
+    if(log_alpha > log(U)){ # Accepted
+      return(ls_star)
+    }
+    else{ # Rejected
+      return(ls)
+    }
+  }
+  
+  MH_2 <- function(ls, w, x, u = 2, l = 1, alpha = 1.5, beta = 0.975, v){
+    #' @description Function to sample the length-scale parameter using Metropolis-Hasting in layer 2, ls_w
+    w <- as.matrix(w, ncol = 1)
+    ls_star <- runif(1, min = l*ls / u, max = u*ls / l) # new value
+    log_alpha <- loglik_wx(w, x, ls_star, 1e-6, v) + 
+      dgamma(ls_star - 1.490116e-08, alpha, beta, log = TRUE) + 
+      log(ls) - 
+      loglik_wx(w, x, ls, 1e-6, v) - 
+      dgamma(ls - 1.490116e-08, alpha, beta, log = TRUE) -
+      log(ls_star)
+    U <- runif(1, 0, 1)
+    if(log_alpha > log(U)){ # Accepted
+      return(ls_star)
+    }
+    else{ # Rejected
+      return(ls)
+    }
+  }
+  
+  ESS_w <- function(x, Y, w, ls_y, ls_w, p = node, g = nugget, v){
+    #' @description To do the Elliptical Slice Sampling update for latent variable w
+    #' @param x is the input of the model
+    #' @param Y is the Output value of the model
+    #' @param w is the initial value for the latent variable
+    #' @param ls_y is the length-scale parameter sampled from MH_1
+    #' @param ls_w is the length-scale parameter sampled from MH_2
+    #' @param p is the nodes in the latent layer
+    #' @param g is the nugget
+    #' @return w is the latent variable matrix(size m*p) after the ESS
+    m <- nrow(w)
+    if (p != ncol(w)){
+      stop("Error: The initial value for the latent value doesn't match the nodes number!")
+    }
+    for (i in 1:p) {
+      theta <- runif(1, 0, 2*pi) # angle
+      theta_min <- theta - 2*pi  # lower basket
+      theta_max <- theta         # upper basket
+      nu <- mvtnorm::rmvnorm(1, mean = matrix(0, nrow = nrow(w)), sigma = deepgp:::Matern(distance(x[,i]), 1, ls_w[i], 0, v)) # random draw from the prior, size = m*1
+      w_prev <- w[, i]
+      ll_prev <- loglik_yw(Y, w[,i], ls_y, g, v)
+      accept <- FALSE
+      count <- 0
+      while (accept == FALSE){
+        count <- count + 1
+        w[,i] <- w_prev * cos(theta) + nu * sin(theta) # Proposal
+        dw <- deepgp:::sq_dist(w)
+        log_alpha <- loglik_yw(Y, w[,i], ls_y, g, v) - ll_prev # log-alpha
+        U <- runif(1, 0, 1)
+        # Check if the proposed sample is on the slice
+        if (log_alpha > log(U)) # Accepted
+        { 
+          accept <- TRUE
+        } 
+        else { # Rejected
+          # Shrink the bracket
+          if (theta < 0) {
+            theta_min <- theta
+          } else {
+            theta_max <- theta
+          }
+          # Draw a new angle from the updated bracket
+          theta <- runif(1, theta_min, theta_max)
+        }
+      }
+    }
+    return(w)
+  }
+  
+  cat("Training ... \n")
+  # Initialize progress bar
+  pb <- txtProgressBar(min = 0, max = n_iteration, style = 3)
+  
+  theta_y_samples <- c(ls_y, rep(NA, n_iteration - 1))                              # To store theta_y samples (layer 1)
+  theta_w_samples <- rbind(ls_w, matrix(NA, ncol = node, nrow = n_iteration - 1))   # To store theta_w samples (layer 2)
+  w_samples <- vector("list", n_iteration)                                          # To store w(latent variables) samples
+  scale_sample <- rep(NA, n_iteration)   # To store scale
+  outer_logl <- rep(NA, n_iteration)     # To store logl
+  w_samples[[1]] <- W
+  scale_sample[1] <- scale_sampling(W, ls_y, Y, g = nugget, v = v)
+  outer_logl[1] <- loglik_yw(Y, W, ls_y, g = 1e-6, v = v)
+  
+  for (i in 2:n_iteration) {
+    w_samples[[i]] <- matrix(NA, nrow = nrow(x), ncol = node)
+  }
+  
+  for (i in 2:n_iteration) {
+    theta_y_samples[i] <- MH_1(ls = theta_y_samples[i-1],
+                               Y, 
+                               w = as.matrix(w_samples[[i-1]], ncol = node),
+                               u = 2, l = 1, v = v)
+    
+    for(j in 1:node){
+      theta_w_samples[i, j] <- MH_2(ls = theta_w_samples[i - 1, j],
+                                    w = as.matrix(w_samples[[i-1]], ncol = node), x,
+                                    u = 2, l = 1, v = v)
+    }
+    
+    w_samples[[i]] <- ESS_w(x, Y, w = as.matrix(w_samples[[i-1]], ncol = node),
+                            ls_y = theta_y_samples[i],
+                            ls_w = theta_w_samples[i,], v = v)
+    
+    scale_sample[i] <- scale_sampling(matrix(w_samples[[i]], ncol = node),
+                                      theta_y_samples[i], 
+                                      Y, 
+                                      g = nugget, v = v)
+    
+    outer_logl[i] <- loglik_yw(Y, matrix(w_samples[[i]], ncol = node), theta_y_samples[i], g = 1e-6, v = v)
+    
+    # Update progress bar
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  cat("done\n")
+  
+  theta_y <- mean(theta_y_samples[burn_in:n_iteration])
+  theta_w <- colMeans(as.matrix(theta_w_samples[burn_in:n_iteration, ]))
+  
+  ########## graph ############### 
+  # Initialize the data frame
+  df_param <- data.frame(
+    iterations = c(burn_in:n_iteration),
+    Theta_y = theta_y_samples[burn_in:n_iteration],
+    outer_logl = outer_logl[burn_in:n_iteration]
+  )
+  
+  n_dims <- ncol(theta_w_samples)
+  # Add columns for each dimension of Theta_w
+  for (i in 1:n_dims) {
+    col_name <- paste0("Theta_w_", i)
+    df_param[[col_name]] <- theta_w_samples[burn_in:n_iteration, i]
+  }
+  
+  # Initialize a list to hold all the plots
+  plot_list <- list()
+  
+  # Add the Theta_y trace plot
+  plot_list[[1]] <- ggplot(df_param, aes(x = iterations, y = Theta_y)) +
+    geom_line() +
+    labs(title = "Trace Plot of theta_y",
+         x = "Iteration",
+         y = "theta_y") +
+    theme_minimal()
+  
+  # Loop through each dimension of theta_w_samples and create a trace plot
+  for (i in 1:n_dims) {
+    plot_name <- paste0("Theta_w_", i)
+    # Add the plot to the list
+    plot_list[[i + 1]] <- ggplot(df_param, aes(x = iterations, y = !!sym(plot_name))) +
+      geom_line() +
+      labs(title = paste0("Trace Plot of theta_w[", i, "]"),
+           x = "Iteration",
+           y = paste0("theta_w[", i, "]")) +
+      theme_minimal()
+  }
+  
+  # Add the outer_logl plot
+  plot_list[[length(plot_list) + 1]] <- ggplot(df_param, aes(x = iterations, y = outer_logl)) +
+    geom_line() +
+    labs(title = "Trace Plot of outer logl",
+         x = "Iteration",
+         y = "outerlogl") +
+    theme_minimal()
+  
+  # Arrange all the plots in a grid
+  p <- do.call(grid.arrange, c(plot_list, ncol = 2))
+  
+  ########## result #######
+  result <- list(
+    theta_y_samples = theta_y_samples[burn_in:n_iteration],
+    theta_w_samples = theta_w_samples[burn_in:n_iteration, ],
+    w_samples = w_samples[burn_in:n_iteration],
+    plot_theta_y = p,
+    scale = scale_sample[burn_in:n_iteration]
+  )
+  return(result)
+}
+######## Predicting ########
+Two_layer_prediction_matern <- function(list, x, Y, x_star, nugget = 1e-6, g = deepgp:::eps, v = 2.5){
+  node <- ncol(x_star)
+  theta_y_samples <- c(list[[1]])         # size: iteration * 1
+  theta_w_samples <- as.matrix(list[[2]]) # size: iteration * p
+  w_sample <- list[[3]]                   # size: a list contain number of iteration matrices, each have size of m*p
+  scale_sample <- list[[5]]
+  iterations <- length(theta_y_samples)
+  
+  cat("Predicting ... \n")
+  pb <- txtProgressBar(min = 0, max = iterations, style = 3)
+  
+  W <- matrix(NA, nrow = nrow(x_star), ncol = node) # To store the latent variable come out from the first layer, size: m'*p
+  mu <- matrix(NA, nrow = iterations, ncol = nrow(x_star))  # To store the mean, size: T * m'
+  Sigma <- vector("list", iterations)  # To store the correlation matrix, is a list, contain T matrices, each have size: 
+  
+  for(i in 1:iterations){
+    ###### layer 1 #######
+    for (j in 1:node) {
+      dx <- distance(x[,j])
+      d_new <- distance(x_star[,j])
+      d_cross <- distance(x_star[,j], x[,j])
+      theta <- theta_w_samples[i,j]
+      C <- deepgp:::Matern(dx, 1, theta, g, v)
+      C_cross <- deepgp:::Matern(d_cross, 1, theta, nugget, v)
+      C_new <- deepgp:::Matern(d_new, 1, theta, g, v)
+      C_inv <- deepgp:::invdet(C)$Mi
+      L <- chol(C)
+      Z <- forwardsolve(t(L), t(C_cross))
+      quadterm <- t(Z) %*% Z
+      mean <- C_cross %*% C_inv %*% (as.matrix(w_sample[[i]]))[,j]
+      sigma_w <- (C_new - quadterm)
+      
+      W[,j] <- matrix(mvtnorm:::rmvnorm(1, mean, sigma_w), ncol = 1) # New w, (size: m'*1). don't do this
+    }
+    ####### Layer 2 #########
+    theta <- theta_y_samples[i]
+    dw <- distance(as.matrix(w_sample[[i]]))
+    dw_new <- distance(W)
+    dw_cross <- distance(W, as.matrix(w_sample[[i]]))
+    R <- deepgp:::Matern(dw, 1, theta, nugget, v)
+    R_cross <- deepgp:::Matern(dw_cross, 1, theta, 0, v)
+    R_new <- deepgp:::Matern(dw_new, 1, theta, nugget, v)
+    R_inv <- deepgp:::invdet(R)$Mi
+    quadterm <- R_cross %*% R_inv %*% t(R_cross)
+    mu[i,] <- R_cross %*% R_inv %*% Y
+    Sigma[[i]] <- scale_sample[i] * (R_new - quadterm) 
+    
+    setTxtProgressBar(pb, i)
+  }
+  
+  result <- list(
+    mean = colMeans(mu),
+    sigma2 = (1/iterations) * Reduce(`+`, Sigma) + cov(mu)
+  )
+  
+  return(result)
+}
+######## Plot the result ######
+plot_result_1 <- function(list, x_test, y_test){
+  predf_1 <- data.frame(test_x = x_test, test_y = y_test,
+                        pre = list$mean, sigma = sqrt((diag(list$sigma2))))
+  
+  ggplot(predf_1, aes(x = test_x)) +
+    geom_point(aes(y = test_y), color = 'cyan3', size = 2) +
+    geom_line(aes(y = pre), color = "red", linewidth = 1) + # Plot predicted values as a line
+    geom_ribbon(aes(ymin = pre + qnorm(0.05, 0, sigma), ymax = pre + qnorm(0.95, 0, sigma)), fill = "grey", alpha = 0.5) +
+    geom_line(aes(y = pre + qnorm(0.05, 0, sigma)), color = 'black', linewidth = 0.3, linetype = "dashed") +
+    geom_line(aes(y = pre + qnorm(0.95, 0, sigma)), color = 'black', linewidth = 0.3, linetype = "dashed") +
+    labs(title = "Actual vs Predicted Values",
+         x = "X",
+         y = "Y / Predicted Y") +
+    theme_minimal()
+}
+
+################################################
+################ One-D example #################
+test_f <- function(x){
+  if(x < 0 || x > 1){
+    return("The input is out of bound")
+  }
+  else if(x < 1/3 || x == 1/3 ){
+    return(1.35 * cos(12 * pi * x))
+  }
+  else if(x > 1/3 && x < 2/3){
+    return(1.35)
+  }
+  else(
+    return(1.35 * cos(6 * pi * x))
+  )
+}
+x_train <- as.matrix(seq(0, 1, length = 20))
+y_train <- as.matrix(sapply(x_train, test_f))
+x_test <- as.matrix(seq(0, 1, length = 200))
+y_test <- as.matrix(sapply(x_test, test_f))
+
+dgp_1 <- fit_two_layer3.0_matern(x = x_train, Y = y_train, u = 2, l = 1, ls_y = 0.1, ls_w = 0.1, node = 1,
+                                      W = x_train, n_iteration = 7000, burn_in = 4000, nugget = 1e-6, v = 2.5)
+pre_1 <- Two_layer_prediction_matern(dgp_1, x_train, y_train, x_test)
+
+myplot <- plot_result_1(pre_1, x_test, y_test)
+data_train <- dplyr::tibble(x_train = x_train, y_train = y_train)
+myplot + geom_point(data = data_train, mapping = aes(x = x_train, y = y_train), col = 'red', size = 3)
+
+######### Vecchia ###########
+fit_two_layer3.0_matern_Vecchia <- function(x, Y, u = 2, l = 1, ls_y = 1, ls_w = 1, node, W, n_iteration = 7000,
+                                            burn_in = 5000, nugget = 1e-6, v = 2.5, k, k_2){
+  #' @description To do the training for simple two layer Deep Gaussian Processes model
+  #' @param x is the input value, which have the size of M * D
+  #' @param Y is the output value, which have the size of M * 1
+  #' @param u is the parameter for the proposals distribution, default to 2 (according to Sauer)
+  #' @param l is the parameter for the proposals distribution, default to 1 (according to Sauer)
+  #' @param ls_y is the initial value for the length-scale parameter in the first layer, default to 1
+  #' @param ls_w is the initial value for the length-scale parameter in the second layer, default to 1
+  #' @param node is the number of latent nodes in the model
+  #' @param W is the initial output value come from the second layer, is the latent variable, default to 1
+  #' @param n_iteration is the number of iteration for the MCMC, default is 10000
+  #' @param burn_in the iteration number for MCMC to warm up
+  #' @param nugget is the nugget, set to 1e-4
+  #' @param v is the smooth parameter for Matern Kernel
+  #' @param k is the number of nearest neighbor for Vecchia conditioning
+  #' @returns result list contain:
+  #'                              1. result summary
+  #'                              2. samples of theta_y
+  #'                              3. samples of theta_w
+  #'                              4. samples of latent variable w
+  #'                              5. trace plot of theta_y
+  
+  library(plgp)
+  library(MASS)
+  library(gridExtra)
+  library(ggplot2)
+  library(deepgp)
+  library(mvtnorm)
+  
+  loglik_yw <- function(Y, w, ls_y, g = 1e-6, v, k, Vecchia = FALSE){
+    #' @description To compute the log-likelihood of the first layer
+    n <- nrow(Y)
+    if(Vecchia == FALSE){
+      R <- deepgp:::Matern(distance(w), 1, ls_y, g, v)
+      quadterm <- t(Y) %*% (deepgp:::invdet(R))$Mi %*% (Y)
+      logl <- - 0.5 * n * log(2*pi*quadterm/n) - 0.5 * (log(det(R)))
+      tau2 <- c(quadterm) / n
+    } 
+    else{
+      NN <- NNRO(w, k)
+      U <- create_U(w, NN, g, ls_y, g, v) # The upper triangular matrix of the cholesky decomposition from the precision matrix
+      Y_order <- as.matrix(Y[NN$ro_indices,], nrow = n) # Let output Y follow the random order
+      logdet <- sum(log(diag(U)))
+      Uty <- crossprod(U, Y_order)
+      ytUUty <- sum(Uty^2)
+      logl <- logdet - (n * 0.5) * log(ytUUty)
+      tau2 <- c(ytUUty)/n
+    }
+    
+    return(list(logl, tau2))
+  }
+  
+  loglik_wx <- function(w, x, ls_w, g = 1e-6, v, NN){
+    #' @description To compute the log-likelihood of the second layer
+    log_l <- rep(NA, node)
+    n <- nrow(w)
+    ro_indices <- NN$ro_indices
+    w <- as.matrix(w[ro_indices,], ncol = ncol(w)) 
+    U <- create_U(x, NN, g, ls_w, g, v)
+    logdet <- sum(log(diag(U)))
+    for (i in 1:node) {
+      Utw <- crossprod(U, w[,i])
+      wtUUtw <- sum(Utw^2)
+      log_l[i] <-logdet - (n * 0.5) * log(wtUUtw)
+    }
+    return(sum(log_l))
+  }
+ 
+  
+  MH_1 <- function(ls, Y, w, u = 2, l = 1, alpha = 1.5, beta = 0.65, v, k, Vecchia = FALSE){
+    #' @description Function to sample the length-scale parameter using Metropolis-Hasting in layer 1, ls_y
+    #' @param ls is the initial value of the length-scale parameter
+    w <- as.matrix(w, ncol = node)
+    ls_star <- runif(1, min = l*ls / u, max = u*ls / l) # new value
+    log_alpha <- loglik_yw(Y, w, ls_star, 1e-6, v, k, Vecchia = Vecchia)[[1]] + 
+      dgamma(ls_star - 1.490116e-08, alpha, beta, log = TRUE) +
+      log(ls) -
+      loglik_yw(Y, w, ls, 1e-6, v, k, Vecchia = Vecchia)[[1]] - 
+      dgamma(ls - 1.490116e-08, alpha, beta, log = TRUE) - 
+      log(ls_star)
+    U <- runif(1, 0, 1)
+    if(log_alpha > log(U)){ # Accepted
+      return(ls_star)
+    }
+    else{ # Rejected
+      return(ls)
+    }
+  }
+  
+  MH_2 <- function(ls, w, x, u = 2, l = 1, alpha = 1.5, beta = 0.975, v, NN){
+    #' @description Function to sample the length-scale parameter using Metropolis-Hasting in layer 2, ls_w
+    #' @param ls is the last value of the length-scale parameter
+    w <- as.matrix(w, ncol = node)
+    ls_star <- runif(1, min = l*ls / u, max = u*ls / l) # new value
+    log_alpha <- loglik_wx(w, x, ls_star, 1e-6, v, NN) + 
+      dgamma(ls_star - 1.490116e-08, alpha, beta, log = TRUE) + 
+      log(ls) - 
+      loglik_wx(w, x, ls, 1e-6, v, NN) - 
+      dgamma(ls - 1.490116e-08, alpha, beta, log = TRUE) -
+      log(ls_star)
+    U <- runif(1, 0, 1)
+    if(log_alpha > log(U)){ # Accepted
+      return(ls_star)
+    }
+    else{ # Rejected
+      return(ls)
+    }
+  }
+  
+  ESS_w <- function(x, Y, w, ls_y, ls_w, p = node, g = nugget, v, k, Vecchia = FALSE){
+    #' @description To do the Elliptical Slice Sampling update for latent variable w
+    #' @param x is the input of the model
+    #' @param Y is the Output value of the model
+    #' @param w is the initial value for the latent variable
+    #' @param ls_y is the length-scale parameter sampled from MH_1
+    #' @param ls_w is the length-scale parameter sampled from MH_2
+    #' @param p is the nodes in the latent layer
+    #' @param g is the nugget
+    #' @return w is the latent variable matrix(size m*p) after the ESS
+    
+    m <- nrow(w)
+    if (p != ncol(w)){
+      stop("Error! The initial value for the latent value doesn't match the nodes number!")
+    }
+    for (i in 1:p) {
+      theta <- runif(1, 0, 2*pi) # angle
+      theta_min <- theta - 2*pi  # lower basket
+      theta_max <- theta         # upper basket
+      nu <- mvtnorm::rmvnorm(1, mean = matrix(0, nrow = nrow(w)), sigma = deepgp:::Matern(distance(x), 1, ls_w[i], 0, v)) # random draw from the prior, size = m*1
+      w_prev <- w[, i]
+      ll_prev <- loglik_yw(Y, w, ls_y, g, v, k, Vecchia = Vecchia)[[1]]
+      accept <- FALSE
+      count <- 0
+      while (accept == FALSE){
+        count <- count + 1
+        w[,i] <- w_prev * cos(theta) + nu * sin(theta) # Proposal
+        dw <- deepgp:::sq_dist(w)
+        log_alpha <- loglik_yw(Y, w, ls_y, g, v, k = k, Vecchia = Vecchia)[[1]] - ll_prev # log-alpha
+        U <- runif(1, 0, 1)
+        # Check if the proposed sample is on the slice
+        if (log_alpha > log(U)) # Accepted
+        { 
+          accept <- TRUE
+        } 
+        else { # Rejected
+          # Shrink the bracket
+          if (theta < 0) {
+            theta_min <- theta
+          } else {
+            theta_max <- theta
+          }
+          # Draw a new angle from the updated bracket
+          theta <- runif(1, theta_min, theta_max)
+        }
+      }
+    }
+    return(w)
+  }
+  
+  cat("Training ... \n")
+  # Initialize progress bar
+  pb <- txtProgressBar(min = 0, max = n_iteration, style = 3)
+  
+  theta_y_samples <- c(ls_y, rep(NA, n_iteration - 1))                              # To store theta_y samples (layer 1)
+  theta_w_samples <- rbind(ls_w, matrix(NA, ncol = node, nrow = n_iteration - 1))   # To store theta_w samples (layer 2)
+  w_samples <- vector("list", n_iteration)                                          # To store w(latent variables) samples
+  scale_sample <- matrix(NA, nrow = n_iteration, ncol = ncol(x))                    # To store scale
+  outer_logl <- rep(NA, n_iteration)                                                # To store outer layer logl
+  w_samples[[1]] <- W
+  scale_sample[1,] <- loglik_yw(Y, W, ls_y, g = 1e-6, v = v, k = k)[[2]]
+  outer_logl[1] <- loglik_yw(Y, W, ls_y, g = 1e-6, v = v, k = k)[[1]]
+  
+  
+  for (i in 2:n_iteration) {
+    w_samples[[i]] <- matrix(NA, nrow = nrow(x), ncol = node)
+  }
+  NN <- NNRO(x, k_2)
+  for (i in 2:n_iteration) {
+    if(i %% 2 == 1){
+      vec <- FALSE
+    } else{
+      vec <- TRUE
+    }
+    theta_y_samples[i] <- MH_1(ls = theta_y_samples[i-1],
+                               Y, 
+                               w = as.matrix(w_samples[[i-1]], ncol = node),
+                               u = 2, l = 1, v = v, k = k, Vecchia = vec)
+    for(j in 1:node){
+      theta_w_samples[i, j] <- MH_2(ls = theta_w_samples[i - 1, j],
+                                    w = as.matrix(w_samples[[i-1]], ncol = node), x,
+                                    u = 2, l = 1, v = v, NN = NN)
+    }
+    
+    w_samples[[i]] <- ESS_w(x, Y, w = as.matrix(w_samples[[i-1]], ncol = node),
+                            ls_y = theta_y_samples[i],
+                            ls_w = theta_w_samples[i,], v = v, k = k, Vecchia = vec)
+    
+    scale_sample[i,] <- loglik_yw(Y, matrix(w_samples[[i]], ncol = node), theta_y_samples[i], g = 1e-6, v = v, k, Vecchia = vec)[[2]]
+    
+    outer_logl[i] <- loglik_yw(Y, matrix(w_samples[[i]], ncol = node), theta_y_samples[i], g = 1e-6, v = v, k, Vecchia = vec)[[1]]
+    
+    # Update progress bar
+    setTxtProgressBar(pb, i)
+  }
+  
+  close(pb)
+  cat("done\n")
+  
+  df_param <- data.frame(
+    Theta_y = theta_y_samples[burn_in:n_iteration],
+    Theta_w_1 = theta_w_samples[burn_in:n_iteration,1],
+    outer_logl = outer_logl[burn_in:n_iteration]
+  )
+  
+  theta_y <- mean(theta_y_samples[burn_in:n_iteration])
+  theta_w <- colMeans(as.matrix(theta_w_samples[burn_in:n_iteration, ]))
+  
+  result_summary <- data.frame(
+    "Layer No." = c("Layer 1", "Layer 2"),
+    "Kernel" = c("Matérn", "Matérn"),
+    "Length-scale" = c(theta_w, theta_y), 
+    "Variance" = c("1 (fixed)", mean(scale_sample)),
+    "Nugget" = c("1e-6 (fixed)", "1e-6 (fixed)"),
+    "Input Dims" = c(ncol(W), ncol(x))
+  )
+  
+  ########## graph ############### 
+  df_param <- data.frame(
+    iterations = c(burn_in:n_iteration),
+    Theta_y = theta_y_samples[burn_in:n_iteration],
+    outer_logl = outer_logl[burn_in:n_iteration]
+  )
+  
+  n_dims <- ncol(theta_w_samples)
+  # Add columns for each dimension of Theta_w
+  for (i in 1:n_dims) {
+    col_name <- paste0("Theta_w_", i)
+    df_param[[col_name]] <- theta_w_samples[burn_in:n_iteration, i]
+  }
+  
+  # Initialize a list to hold all the plots
+  plot_list <- list()
+  
+  # Add the Theta_y trace plot
+  plot_list[[1]] <- ggplot(df_param, aes(x = iterations, y = Theta_y)) +
+    geom_line() +
+    labs(title = "Trace Plot of theta_y",
+         x = "Iteration",
+         y = "theta_y") +
+    theme_minimal()
+  
+  # Loop through each dimension of theta_w_samples and create a trace plot
+  for (i in 1:n_dims) {
+    plot_name <- paste0("Theta_w_", i)
+    # Add the plot to the list
+    plot_list[[i + 1]] <- ggplot(df_param, aes(x = iterations, y = !!sym(plot_name))) +
+      geom_line() +
+      labs(title = paste0("Trace Plot of theta_w[", i, "]"),
+           x = "Iteration",
+           y = paste0("theta_w[", i, "]")) +
+      theme_minimal()
+  }
+  
+  # Add the outer_logl plot
+  plot_list[[length(plot_list) + 1]] <- ggplot(df_param, aes(x = iterations, y = outer_logl)) +
+    geom_line() +
+    labs(title = "Trace Plot of outer logl",
+         x = "Iteration",
+         y = "outerlogl") +
+    theme_minimal()
+  
+  # Arrange all the plots in a grid
+  p <- do.call(grid.arrange, c(plot_list, ncol = 2))
+  ########## result #######
+  result <- list(
+    theta_y_samples = theta_y_samples[burn_in:n_iteration],
+    theta_w_samples = theta_w_samples[burn_in:n_iteration, ],
+    w_samples = w_samples[burn_in:n_iteration],
+    plot_theta_y = p,
+    scale = scale_sample[burn_in:n_iteration]
+  )
+  
+  return(result)
+}
+
+dgp_Vecchia <- fit_two_layer3.0_matern_Vecchia(x = x_train, Y = y_train, ls_y = 0.1, ls_w = 0.1, node = 1,
+                                               W = x_train, v = 2.5, k = 15, k_2 = 15)
+
+pre_Vec <- Two_layer_prediction_matern(dgp_Vecchia, x_train, y_train, x_test)
+
+Vecchia_plot_result_1 <- function(list, x_test, y_test){
+  predf_1 <- data.frame(test_x = x_test, test_y = y_test,
+                        pre = list$mean, sigma = sqrt((diag(list$sigma2))))
+  
+  ggplot(predf_1, aes(x = test_x)) +
+    geom_point(aes(y = test_y), color = 'cyan3', size = 2) +
+    geom_line(aes(y = pre), color = "red", linewidth = 1) + # Plot predicted values as a line
+    geom_ribbon(aes(ymin = pre + qnorm(0.05, 0, sigma), ymax = pre + qnorm(0.95, 0, sigma)), fill = "grey", alpha = 0.5) +
+    geom_line(aes(y = pre + qnorm(0.05, 0, sigma)), color = 'black', linewidth = 0.3, linetype = "dashed") +
+    geom_line(aes(y = pre + qnorm(0.95, 0, sigma)), color = 'black', linewidth = 0.3, linetype = "dashed") +
+    labs(title = "Actual vs Predicted Values(Vecchia)",
+         x = "X",
+         y = "Y / Predicted Y") +
+    theme_minimal()
+}
+
+myplot <- Vecchia_plot_result_1(pre_Vec, x_test, y_test)
+data_train <- dplyr::tibble(x_train = x_train, y_train = y_train)
+myplot + geom_point(data = data_train, mapping = aes(x = x_train, y = y_train), col = 'red', size = 3)
+
+
+
+
+################################################
+################ Two-D example #################
+two_d <- function(x1, x2){
+  return(10 * x1 * exp(-(x1)^2 - (x2)^2))
+}
+# Create a regular grid of x1 and x2
+x1_seq <- seq(-2, 4, length.out = 30)
+x2_seq <- seq(-2, 4, length.out = 30)
+x1_pre <- seq(-2, 4, length.out = 300)
+x2_pre <- seq(-2, 4, length.out = 300)
+grid <- expand.grid(x1_seq, x2_seq)
+
+# Evaluate the function on the grid
+y_train2 <- matrix(two_d(grid[,1], grid[,2]), nrow = 30, ncol = 30)
+
+# Create the 3D surface plot
+plot_ly(x = x_seq, y = y_seq, z = y_train2, type = 'surface', opacity = 0.7) %>%
+  layout(title = "3D Surface Plot",
+         scene = list(xaxis = list(title = 'X1'),
+                      yaxis = list(title = 'X2'),
+                      zaxis = list(title = 'Z')))
+
+x_train2 <- matrix(c(x1_seq, x2_seq), ncol = 2)
+y_train2 <- matrix(two_d(x_train2[,1], x_train2[,2]), ncol = 1)
+x_pre2 <- matrix(c(x1_pre, x2_pre), ncol = 2)
+y_pre2 <- matrix(two_d(x_pre2[,1], x_pre2[,2]), ncol = 1)
+dgp_2 <- fit_two_layer3.0_matern(x = x_train2, Y = y_train2, u = 2, l = 1, ls_y = 0.1, ls_w = c(0.1, 0.1), node = 2,
+                                 W = x_train2, n_iteration = 20000, burn_in = 15000, nugget = 1e-6, v = 2.5)
+pre_2 <- Two_layer_prediction_matern(dgp_2, x_train2, y_train2, x_pre2)
+
+fit = dgpsi::dgp(x_train2, matrix(y_train2, ncol = 1), name = "matern2.5")
+
+
+
+
+
