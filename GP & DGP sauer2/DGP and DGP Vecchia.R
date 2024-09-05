@@ -45,14 +45,11 @@ fit_two_layer3.0_matern <- function(x, Y, u = 2, l = 1, ls_y = 1, ls_w = 1, node
   
   loglik_wx <- function(w, x, ls_w, g = 1e-6, v){
     #' @description To compute the log-likelihood of the second layer
-    w <- matrix(w, ncol = node)
+    w <- matrix(w, ncol = 1)
     R <- deepgp:::Matern(distance(x), 1, ls_w, g, v)
-    log_l <- rep(NA, node)
-    for (i in 1:node) {
-      quadterm <- t(w[,i]) %*% (deepgp:::invdet(R))$Mi %*% (w[,i])
-      log_l[i] <- (- 0.5) * log(det(R)) - 0.5 * (quadterm)
-    }
-    return(sum(log_l))
+    quadterm <- t(w) %*% (deepgp:::invdet(R))$Mi %*% (w)
+    log_l <- (- 0.5) * log(det(R)) - 0.5 * (quadterm)
+    return(log_l)
   }
   
   MH_1 <- function(ls, Y, w, u = 2, l = 1, alpha = 1.5, beta = 0.65, v){
@@ -111,16 +108,18 @@ fit_two_layer3.0_matern <- function(x, Y, u = 2, l = 1, ls_y = 1, ls_w = 1, node
       theta <- runif(1, 0, 2*pi) # angle
       theta_min <- theta - 2*pi  # lower basket
       theta_max <- theta         # upper basket
-      nu <- mvtnorm::rmvnorm(1, mean = matrix(0, nrow = nrow(w)), sigma = deepgp:::Matern(distance(x[,i]), 1, ls_w[i], 0, v)) # random draw from the prior, size = m*1
+      nu <- mvtnorm::rmvnorm(1, mean = matrix(0, nrow = nrow(w)), sigma = deepgp:::Matern(distance(x), 1, ls_w[,i], 0, v)) # random draw from the prior, size = m*1
       w_prev <- w[, i]
-      ll_prev <- loglik_yw(Y, w[,i], ls_y, g, v)
+      #ll_prev <- loglik_yw(Y, w[,i], ls_y, g, v)
+      ll_prev <- loglik_yw(Y, w, ls_y, g, v)
       accept <- FALSE
       count <- 0
       while (accept == FALSE){
         count <- count + 1
         w[,i] <- w_prev * cos(theta) + nu * sin(theta) # Proposal
         dw <- deepgp:::sq_dist(w)
-        log_alpha <- loglik_yw(Y, w[,i], ls_y, g, v) - ll_prev # log-alpha
+        #log_alpha <- loglik_yw(Y, w[,i], ls_y, g, v) - ll_prev # log-alpha
+        log_alpha <- loglik_yw(Y, w, ls_y, g, v) - ll_prev # log-alpha
         U <- runif(1, 0, 1)
         # Check if the proposed sample is on the slice
         if (log_alpha > log(U)) # Accepted
@@ -167,13 +166,13 @@ fit_two_layer3.0_matern <- function(x, Y, u = 2, l = 1, ls_y = 1, ls_w = 1, node
     
     for(j in 1:node){
       theta_w_samples[i, j] <- MH_2(ls = theta_w_samples[i - 1, j],
-                                    w = as.matrix(w_samples[[i-1]], ncol = node), x,
+                                    w = (matrix(w_samples[[i-1]], ncol = node))[,j], x,
                                     u = 2, l = 1, v = v)
     }
     
     w_samples[[i]] <- ESS_w(x, Y, w = as.matrix(w_samples[[i-1]], ncol = node),
                             ls_y = theta_y_samples[i],
-                            ls_w = theta_w_samples[i,], v = v)
+                            ls_w = matrix(theta_w_samples[i,], ncol = node), v = v)
     
     scale_sample[i] <- scale_sampling(matrix(w_samples[[i]], ncol = node),
                                       theta_y_samples[i], 
@@ -285,7 +284,7 @@ Two_layer_prediction_matern <- function(list, x, Y, x_star, nugget = 1e-6, g = d
       
       W[,j] <- matrix(mvtnorm:::rmvnorm(1, mean, sigma_w), ncol = 1) # New w, (size: m'*1). don't do this
     }
-    ####### Layer 2 #########
+    ####### Layer 2 #######
     theta <- theta_y_samples[i]
     dw <- distance(as.matrix(w_sample[[i]]))
     dw_new <- distance(W)
@@ -325,35 +324,61 @@ plot_result_1 <- function(list, x_test, y_test){
     theme_minimal()
 }
 
+plot_ESS_samples1 <- function(matrix_list, x){
+  matrix_list <- matrix_list
+  # Create a data frame to store all the data for plotting
+  data_list <- list()
+  
+  for (i in 1:length(matrix_list)) {
+    # Extract the y-values (from each matrix in the list)
+    y <- matrix_list[[i]]
+    
+    # Combine x and y into a data frame, along with an identifier for each matrix
+    data_list[[i]] <- data.frame(x = x[,1], y = y[,1], matrix_id = i)
+  }
+  
+  # Combine all data frames into one large data frame
+  plot_data <- do.call(rbind, data_list)
+  
+  # Plot using ggplot2 and overlay all lines on the same plot
+  ggplot(plot_data, aes(x = x, y = y, group = matrix_id)) +
+    geom_line(alpha = 0.1, color = "red") +  # Set transparency with alpha
+    labs(title = "ESS samples",
+         x = "x",
+         y = "w")
+}
+
 ################################################
 ################ One-D example #################
-test_f <- function(x){
-  if(x < 0 || x > 1){
-    return("The input is out of bound")
-  }
-  else if(x < 1/3 || x == 1/3 ){
-    return(1.35 * cos(12 * pi * x))
-  }
-  else if(x > 1/3 && x < 2/3){
-    return(1.35)
-  }
-  else(
-    return(1.35 * cos(6 * pi * x))
-  )
+higdon <- function(x) {
+  i <- which(x <= 0.6)
+  x[i] <- 2 * sin(pi * 0.8 * x[i] * 4) + 0.4 * cos(pi * 0.8 * x[i] * 16)
+  x[-i] <- 2 * x[-i] - 1
+  return(x)
 }
-x_train <- as.matrix(seq(0, 1, length = 20))
-y_train <- as.matrix(sapply(x_train, test_f))
-x_test <- as.matrix(seq(0, 1, length = 200))
-y_test <- as.matrix(sapply(x_test, test_f))
+
+# Training data
+n <- 24
+x_train <- matrix(seq(0, 1, length = n), ncol = 1)
+y_train <- matrix(higdon(x_train), ncol = 1)
+
+# Testing data
+np <- 100
+x_test <- matrix(seq(0, 1, length = np), ncol = 1)
+y_test <- matrix(higdon(x_test), ncol = 1)
+
+plot(x_test, y_test, type = "l", col = 4, xlab = "X", ylab = "Y", main = "Higdon function")
+points(x_train, y_train)
 
 dgp_1 <- fit_two_layer3.0_matern(x = x_train, Y = y_train, u = 2, l = 1, ls_y = 0.1, ls_w = 0.1, node = 1,
-                                      W = x_train, n_iteration = 7000, burn_in = 4000, nugget = 1e-6, v = 2.5)
+                                      W = x_train, n_iteration = 10000, burn_in = 7000, nugget = 1e-6, v = 2.5)
 pre_1 <- Two_layer_prediction_matern(dgp_1, x_train, y_train, x_test)
 
 myplot <- plot_result_1(pre_1, x_test, y_test)
 data_train <- dplyr::tibble(x_train = x_train, y_train = y_train)
 myplot + geom_point(data = data_train, mapping = aes(x = x_train, y = y_train), col = 'red', size = 3)
 
+plot_ESS_samples1(dgp_1$w_samples, x_train)
 ######### Vecchia ###########
 fit_two_layer3.0_matern_Vecchia <- function(x, Y, u = 2, l = 1, ls_y = 1, ls_w = 1, node, W, n_iteration = 7000,
                                             burn_in = 5000, nugget = 1e-6, v = 2.5, k, k_2){
@@ -701,6 +726,58 @@ pre_2 <- Two_layer_prediction_matern(dgp_2, x_train2, y_train2, x_pre2)
 
 fit = dgpsi::dgp(x_train2, matrix(y_train2, ncol = 1), name = "matern2.5")
 
+########## NNRO and create U #########
+NNRO <- function(input_loc, k) {
+  #' @description Function to find the nearest locations for the input locations after random ordering
+  #' @description And here we consider the observation locations first, and prediction locations after
+  #' @param input_loc matrix of observation locations (size: m * d) (After ordering)
+  #' @param k the number of nearest locations to find
+  #' @return NNarray a matrix where each row contains the indices of the nearest k locations in the training data
+  n_obs <- nrow(input_loc)
+  node <-  ncol(input_loc)
+  if(k > n_obs){
+    stop("Error: The number of nearest number can't be larger than the number of rows in the input matrix.")
+  }
+  
+  NNarray <- matrix(NA, nrow = n_obs, ncol = k) # to store the row index of the nearest k locations
+  NN_array <- matrix(NA, nrow = n_obs, ncol = k)
+  ro_indices <- sample(n_obs)  # Random ordered row indices
+  ro_input <- cbind(as.matrix(input_loc[ro_indices, ]), ro_indices, 1:n_obs)
+  
+  for (i in 1:nrow(ro_input)) {
+    # Calculate the Euclidean distances
+    distances <- sqrt(  rowSums( as.matrix( (ro_input[1:(i-1), 1:node] - ro_input[i, 1:node]) ^ 2, ncol = node) ))
+    # Get the indices of the n smallest distances
+    nearest_indices <- order(distances)[1:k]
+    NN_array[i,] <- sort(c((ro_input[1:(i-1), node + 2])[nearest_indices]), na.last = TRUE)
+  }
+  return(list(k = k,
+              NN_array = NN_array,
+              ro_indices = ro_indices,
+              random_ordered_input = ro_input))
+}
+
+
+create_U <- function(w, NN, nugget, ls_y, g, v){
+  k <- NN$k
+  order <- NN$ro_indices
+  w_order <- matrix(w[order, ], ncol = ncol(w))
+  U <- matrix(0, ncol = nrow(w), nrow = nrow(w))  # Size of m*m
+  sigma <- rep(NA, nrow(w)) # Size of m*1
+  for(i in 1:nrow(w_order)){
+    index <- NN$NN_array[i,]     # Get the nearest neighbor index
+    index <- index[!is.na(index)]  # Get rid of the NA values
+    W <- as.matrix(w_order[index, ], ncol = node) # Get the W_(c(i)) which is the conditional set
+    sigma_w <- deepgp:::Matern(distance(w_order[i,]), 1, ls_y, g, v)
+    sigma_W <- deepgp:::Matern(distance(W), 1, ls_y, g, v)
+    sigma_wW <- deepgp:::Matern(distance(w_order[i,], W), 1, ls_y, g, v)
+    B <- sigma_wW %*% deepgp:::invdet(sigma_W)$Mi
+    sigma[i] <- sigma_w - B %*% t(sigma_wW)
+    U[index, i] <- - (1/sqrt(sigma[i])) %*% (B)
+  }
+  diag(U) <- diag(U) + (1/sqrt(sigma))
+  return(U)
+}
 
 
 
