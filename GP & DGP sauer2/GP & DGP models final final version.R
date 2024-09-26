@@ -69,6 +69,31 @@ plot_result_1 <- function(list, x_train, y_train, x_test, y_test){
   
 }
 
+plot_ESS_samples1 <- function(matrix_list, x){
+  matrix_list <- matrix_list
+  # Create a data frame to store all the data for plotting
+  data_list <- list()
+  
+  for (i in 1:length(matrix_list)) {
+    # Extract the y-values (from each matrix in the list)
+    y <- matrix_list[[i]]
+    
+    # Combine x and y into a data frame, along with an identifier for each matrix
+    data_list[[i]] <- data.frame(x = x[,1], y = y[,1], matrix_id = i)
+  }
+  
+  # Combine all data frames into one large data frame
+  plot_data <- do.call(rbind, data_list)
+  
+  # Plot using ggplot2 and map the line color to matrix_id with a color gradient
+  ggplot(plot_data, aes(x = x, y = y, group = matrix_id, color = matrix_id)) +
+    geom_line(alpha = 0.6) +  # Set transparency with alpha
+    scale_color_gradient(low = "red", high = "yellow") +  # Gradient from red to yellow
+    labs(title = "ESS samples",
+         x = "x",
+         y = "w") +
+    theme_minimal()  # Optional: improve plot aesthetics
+}
 
 ########## GP ###############
 ###### Training ############
@@ -561,7 +586,7 @@ dgp1 <- fit_two_layer3.0_matern(x = X_gp, Y = Y_gp, u = 2, l = 1, ls_y = 0.1, ls
                                 W = X_gp, n_iteration = 10000, burn_in = 7000, nugget = 1e-6, v = 2.5)
 pre2 <- Two_layer_prediction_matern(dgp1, X_gp, Y_gp, test_x)
 plot_result_1(pre2, X_gp, Y_gp, test_x, test_y)
-
+plot_ESS_samples1(dgp1$w_samples, X_gp)
 
 
 #################### Vecchia #######################
